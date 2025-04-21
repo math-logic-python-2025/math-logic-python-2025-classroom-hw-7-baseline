@@ -112,6 +112,8 @@ class Model(Generic[T]):
         self.function_interpretations = frozendict(
             {function: frozendict(function_interpretations[function]) for function in function_interpretations}
         )
+        self.formula_cache = dict()
+        self.max_cache_size = 1000
 
     def __repr__(self) -> str:
         """Computes a string representation of the current model.
@@ -150,52 +152,62 @@ class Model(Generic[T]):
         """
         assert term.constants().issubset(self.constant_interpretations.keys())
         assert term.variables().issubset(assignment.keys())
-        for function, arity in term.functions():
-            assert function in self.function_interpretations and self.function_arities[function] == arity
-        # Task 7.7
+        r = term.root
+        if is_constant(r): return self.constant_interpretations[r]
+        if is_variable(r): return assignment[r]
+        if is_function(r): return self.function_interpretations[r][
+            tuple(self.evaluate_term(a, assignment) for a in term.arguments)]
 
     def evaluate_formula(self, formula: Formula, assignment: Mapping[str, T] = frozendict()) -> bool:
-        """Calculates the truth value of the given formula in the current model
-        under the given assignment of values to free occurrences of variable
-        names.
-
-        Parameters:
-            formula: formula to calculate the truth value of, for the constant,
-                function, and relation names of which the current model has
-                interpretations.
-            assignment: mapping from each variable name that has a free
-                occurrence in the given formula to a universe element to which
-                it is to be evaluated.
-
-        Returns:
-            The truth value of the given formula in the current model under the
-            given assignment of values to free occurrences of variable names.
-        """
+        """Calculates the truth value of the given formula in the current model under the given assignment."""
         assert formula.constants().issubset(self.constant_interpretations.keys())
         assert formula.free_variables().issubset(assignment.keys())
-        for function, arity in formula.functions():
-            assert function in self.function_interpretations and self.function_arities[function] == arity
-        for relation, arity in formula.relations():
-            assert relation in self.relation_interpretations and self.relation_arities[relation] in {-1, arity}
-        # Task 7.8
+        for r, n in formula.relations(): assert r in self.relation_interpretations and self.relation_arities[r] in {-1,
+                                                                                                                    n}
+
+        def eval_bin(f, op):
+            return op(self.evaluate_formula(f.first, assignment), self.evaluate_formula(f.second, assignment))
+
+        def eval_quant(f, op):
+            return op(self.evaluate_formula(f.statement, {**assignment, f.variable: v}) for v in self.universe)
+
+        k = (formula, frozenset(assignment.items()))
+        c = self.formula_cache
+        if k in c: return c[k]
+        if len(c) > self.max_cache_size: c.pop(next(iter(c)))
+
+        r = formula.root
+        if is_equality(r):
+            v = self.evaluate_term(formula.arguments[0], assignment) is self.evaluate_term(formula.arguments[1],
+                                                                                           assignment)
+        elif is_relation(r):
+            v = tuple(self.evaluate_term(a, assignment) for a in formula.arguments) in self.relation_interpretations[r]
+        elif is_unary(r):
+            v = not self.evaluate_formula(formula.first, assignment)
+        elif is_binary(r):
+            ops = {'&': lambda x, y: x and y, '|': lambda x, y: x or y, '->': lambda x, y: (not x) or y,
+                   '-&': lambda x, y: not (x and y), '-|': lambda x, y: not (x or y), '+': lambda x, y: x != y,
+                   '<->': lambda x, y: x == y}
+            v = eval_bin(formula, ops[r])
+        else:  # quantifier
+            v = eval_quant(formula, all if r == 'A' else any)
+
+        c[k] = v
+        return v
 
     def is_model_of(self, formulas: AbstractSet[Formula]) -> bool:
-        """Checks if the current model is a model of the given formulas.
-
-        Parameters:
-            formulas: formulas to check, for the constant, function, and
-                relation names of which the current model has interpretations.
-
-        Returns:
-            ``True`` if each of the given formulas evaluates to true in the
-            current model under any assignment of elements from the universe of
-            the current model to the free occurrences of variable names in that
-            formula, ``False`` otherwise.
-        """
         for formula in formulas:
             assert formula.constants().issubset(self.constant_interpretations.keys())
             for function, arity in formula.functions():
                 assert function in self.function_interpretations and self.function_arities[function] == arity
             for relation, arity in formula.relations():
                 assert relation in self.relation_interpretations and self.relation_arities[relation] in {-1, arity}
-        # Task 7.9
+
+        for formula in formulas:
+            free_vars = formula.free_variables()
+            if free_vars:
+                for var in free_vars:
+                    formula = Formula('A', var, formula)
+            if not self.evaluate_formula(formula):
+                return False
+        return True
